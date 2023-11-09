@@ -1,0 +1,188 @@
+-- WGU Medical Data Cleaning. Turning Yes/No strings into boolean True/False statements
+
+-- diabetes to boolean
+
+ALTER TABLE public.servicesaddon 
+ALTER diabetes 
+TYPE boolean 
+USING CASE WHEN diabetes ='Yes' 
+THEN TRUE 
+ELSE FALSE 
+END;
+
+-- asthma to boolean
+
+ALTER TABLE public.servicesaddon 
+ALTER asthma 
+TYPE boolean 
+USING CASE WHEN asthma ='Yes' 
+THEN TRUE 
+ELSE FALSE 
+END;
+
+-- overweight to boolean
+
+ALTER TABLE public.servicesaddon 
+ALTER overweight 
+TYPE boolean 
+USING CASE WHEN overweight ='Yes' 
+THEN TRUE
+ELSE FALSE 
+END;
+
+--Since I'll be using one database in tableau I need to label the source of this data as being from WGU so I am adding a source column
+
+ALTER TABLE public.patient 
+ADD COLUMN source text;
+
+UPDATE public.patient 
+SET source = 'WGU';
+
+--All prior usage of this dataset indicates that Gender 'Prefer not to answer' should be construed as non-binary. Updating this accordingly.
+
+UPDATE public.patient 
+SET gender = REPLACE(gender, 'Prefer not to answer', 'Non-Binary');
+
+
+--CDC Data caps age at 80. So I will change any age above 80 in the WGU set to 80 as well.
+
+UPDATE public.patient 
+SET age = 80
+WHERE age > 80;
+
+-- Importing the 2 CSVs from the CDC data that I'm actually using. This is a lengthy process. 
+-- In the real world I think I would do this in Python as I find it's quicker to pick and choose exactly what columns you want.
+
+CREATE TABLE public.cdc_demo
+(
+	seqn text, 
+	gender text, 
+	age numeric, 
+	CONSTRAINT participant_id PRIMARY KEY (seqn)
+);
+
+ALTER TABLE public.cdc_demo
+ OWNER TO postgres;
+
+-- Import the demographic CSV into the demographic table. This is a large table and took a long time. 
+
+COPY cdc_demo
+FROM 'C:\Users\Public\Downloads\demographic.csv'
+DELIMITER ','
+CSV HEADER;
+
+
+CREATE TABLE public.cdc_quest
+(
+	seqn text, 
+	diabetes text, 
+ 	asthma text, 
+ 	overweight text, 
+ 	CONSTRAINT seqn_id PRIMARY KEY (seqn)
+);
+
+ALTER TABLE public.cdc_quest
+ OWNER TO postgres;
+
+-- Import the questionnaire CSV into the questionnaire table
+
+COPY cdc_quest
+FROM 'C:\Users\Public\Downloads\questionnaire.csv'
+DELIMITER ','
+CSV HEADER;
+
+-- CDC Data Cleaning
+
+-- Update gender column to match WGU data 
+
+UPDATE public.cdc_demo 
+SET gender = 
+CASE WHEN gender = '2' THEN 'Female'
+WHEN gender = '1' THEN 'Male' 
+END;
+
+-- Update ashtma column to match WGU data
+
+ALTER TABLE public.cdc_quest 
+ALTER asthma 
+TYPE boolean 
+USING CASE WHEN asthma = '1' THEN True 
+ELSE False 
+END;
+
+-- Update diabetes column to match WGU data
+
+ALTER TABLE public.cdc_quest 
+ALTER diabetes 
+TYPE boolean 
+USING CASE
+WHEN diabetes = '2' THEN False 
+ELSE True 
+END;
+
+-- Update overweight column to match WGU data
+
+ALTER TABLE public.cdc_quest 
+ALTER overweight 
+TYPE boolean 
+USING CASE WHEN overweight = '2' THEN False 
+ELSE True 
+END;
+
+-- Adding source column to differentiate from WGU data in tableau after table union
+
+ALTER TABLE public.cdc_demo 
+ADD COLUMN source text;
+
+UPDATE public.cdc_demo 
+SET source = 'CDC';
+
+-- Removing minors from both CDC tables to standardize ages
+
+DELETE FROM cdc_quest 
+WHERE seqn IN (
+	SELECT seqn AS id FROM
+	cdc_demo WHERE age < 18);
+
+DELETE FROM cdc_demo 
+WHERE seqn IN (
+	SELECT seqn AS id FROM
+	cdc_demo WHERE age < 18);
+
+-- Maintain referential integrity by adding foreign keys to WGU tables, as well as the CDC data
+
+ALTER TABLE public.servicesaddon 
+ADD FOREIGN KEY (patient_id) 
+REFERENCES public.patient(patient_id);
+
+ALTER TABLE public.survey_responses_addon 
+ADD FOREIGN KEY (patient_id)
+REFERENCES public.patient(patient_id);
+
+ALTER TABLE public.cdc_quest 
+ADD FOREIGN KEY (seqn) 
+REFERENCES public.cdc_demo(seqn); 
+
+-- Create UNION table for all data that I will use in Tableau. To do this I will create two temp tables, one from each source (WGU/CDC),
+-- UNION both tables together into a third final_data table, and then delete the two temp tables. 
+
+CREATE TABLE wgunew AS (
+ SELECT pat.age, pat.gender, cond.asthma, cond.diabetes, cond.overweight, pat.source
+ FROM patient AS pat
+ INNER JOIN servicesaddon AS cond
+ ON pat.patient_id = cond.patient_id);
+
+CREATE TABLE cdcnew AS (
+ SELECT demo.age, demo.gender, ques.asthma, ques.diabetes, ques.overweight, demo.source
+ FROM cdc_demo AS demo
+ INNER JOIN cdc_quest AS ques
+ ON demo.seqn = ques.seqn);
+
+CREATE TABLE final_data AS (
+ SELECT *
+ FROM wgunew
+ UNION ALL
+ SELECT *
+ FROM cdcnew);
+DROP TABLE IF EXISTS wgunew;
+DROP TABLE IF EXISTS cdcnew; 
